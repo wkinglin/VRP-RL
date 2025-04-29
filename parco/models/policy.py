@@ -1,17 +1,20 @@
-from typing import List
+from typing import Callable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from einops import rearrange
-from tensordict import TensorDict
-from rl4co.utils.pylogger import get_pylogger
+
 from rl4co.utils.ops import batchify
+from rl4co.utils.pylogger import get_pylogger
+from tensordict import TensorDict
 
 from .agent_handlers import get_agent_handler
-from .decoder import PARCODecoder, MatNetDecoder
-from .decoding_strategies import PARCODecodingStrategy, parco_get_decoding_strategy, PARCO4FFSPDecoding
-from .encoder import PARCOEncoder, MatNetEncoder
+from .decoder import MatNetDecoder, PARCODecoder
+from .decoding_strategies import (
+    PARCO4FFSPDecoding,
+    PARCODecodingStrategy,
+    parco_get_decoding_strategy,
+)
+from .encoder import MatNetEncoder, PARCOEncoder
 from .utils import get_log_likelihood
 
 log = get_pylogger(__name__)
@@ -47,12 +50,18 @@ class PARCOPolicy(nn.Module):
         train_decode_type: str = "sampling",
         val_decode_type: str = "greedy",
         test_decode_type: str = "greedy",
-        agent_handler="highprob",  # Agent handler
+        agent_handler=None,  # Agent handler
         agent_handler_kwargs: dict = {},  # Agent handler kwargs
         use_init_logp: bool = True,  # Return initial logp for actions even with conflicts
         mask_handled: bool = False,  # Mask out handled actions (make logprobs 0)
         replacement_value_key: str = "current_node",  # When stopping arises (conflict or POS token), replace the value of this key
+        use_pos_token: bool = False,  # Add a POS (pause-of-sequence) action
+        trainable_pos_token: bool = True,  # If true, then the pos token is trainable
+        # two_stage_pos_sampling: bool = True,  # new, faster
         parallel_gated_kwargs: dict = None,  # ParallelGatedMLP kwargs
+        sdpa_fn_decoder: (
+            Callable | str
+        ) = "simple",  # SDPA function for decoder, simple is JIC https://github.com/ai4co/rl4co/issues/228
     ):
         super(PARCOPolicy, self).__init__()
 
@@ -82,6 +91,8 @@ class PARCOPolicy(nn.Module):
                 init_embedding_kwargs=init_embedding_kwargs,
                 use_final_norm=use_final_norm,
                 norm_after=norm_after,
+                use_pos_token=use_pos_token,
+                trainable_pos_token=trainable_pos_token,
                 parallel_gated_kwargs=parallel_gated_kwargs,
             )
         else:
@@ -96,6 +107,8 @@ class PARCOPolicy(nn.Module):
                 context_embedding=context_embedding,
                 context_embedding_kwargs=context_embedding_kwargs,
                 env_name=self.env_name,
+                use_pos_token=use_pos_token,
+                sdpa_fn=sdpa_fn_decoder,
             )
         else:
             log.warning("Using custom decoder")
@@ -106,6 +119,8 @@ class PARCOPolicy(nn.Module):
 
         # Multi-agent handling
         self.replacement_value_key = replacement_value_key
+        self.use_pos_token = use_pos_token
+        # self.two_stage_pos_sampling = two_stage_pos_sampling
         self.mask_handled = mask_handled
         self.use_init_logp = use_init_logp
 
@@ -155,7 +170,6 @@ class PARCOPolicy(nn.Module):
 
         # Pre-decoding hook: used for the initial step(s) of the decoding strategy
         td, env, num_samples = decode_strategy.pre_decoder_hook(td, env)
-        num_samples * num_agents
 
         # Additionally call a decoder hook if needed before main decoding
         td, env, hidden = self.decoder.pre_decoder_hook(td, env, hidden, num_samples)
@@ -218,12 +232,9 @@ class PARCOPolicy(nn.Module):
         return outdict
 
 
-
-
-from parco.envs import FFSPEnv
-
 class PARCOMultiStagePolicy(nn.Module):
     """Apply a OneStageModel for each stage"""
+
     def __init__(
         self,
         num_stages: int,
@@ -236,34 +247,44 @@ class PARCOMultiStagePolicy(nn.Module):
         init_embedding_kwargs: dict = {},
         context_embedding: nn.Module = None,
         context_embedding_kwargs: dict = {},
-        dynamic_embedding: nn.Module = None, 
+        dynamic_embedding: nn.Module = None,
         dynamic_embedding_kwargs: dict = {},
         normalization: str = "instance",
-        scale_factor: float = 100,
+        norm_after: bool = True,
+        scale_factor: float = 10,
         use_decoder_mha_mask: bool = False,
         use_ham_encoder: bool = True,
         pointer_check_nan: bool = True,
         env_name: str = "ffsp",
         use_pos_token: bool = True,
         train_decode_type: str = "sampling",
-        val_decode_type: str = "greedy",
-        test_decode_type: str = "greedy",
+        val_decode_type: str = "sampling",
+        test_decode_type: str = "sampling",
         agent_handler=None,  # Agent handler
         agent_handler_kwargs: dict = {},  # Agent handler kwargs
-        use_init_logp: bool = True,  # Return initial logp for actions even with conflicts
-        mask_handled: bool = False,  # Mask out handled actions (make logprobs 0)
+        use_init_logp: bool = False,  # Return initial logp for actions even with conflicts
+        mask_handled: bool = True,  # Mask out handled actions (make logprobs 0)
         replacement_value_key: str = "current_node",  # When stopping arises (conflict or POS token), replace the value of this key
-        parallel_gated_kwargs: dict = None,  # ParallelGatedMLP kwargs
-        **transformer_kwargs
+        **transformer_kwargs,
     ):
         super().__init__()
+
+        # Multi-agent handling
+        self.use_pos_token = use_pos_token
+        self.mask_handled = mask_handled
+        self.use_init_logp = use_init_logp
+
+        if agent_handler is not None:
+            if isinstance(agent_handler, str):
+                agent_handler = get_agent_handler(agent_handler, **agent_handler_kwargs)
+        self.agent_handler = agent_handler
 
         self.stage_cnt = num_stages
         self.stage_models = nn.ModuleList(
             [
                 OneStageModel(
                     stage_idx,
-                    num_stages, 
+                    num_stages,
                     embed_dim=embed_dim,
                     num_encoder_layers=num_encoder_layers,
                     num_heads=num_heads,
@@ -276,14 +297,19 @@ class PARCOMultiStagePolicy(nn.Module):
                     dynamic_embedding=dynamic_embedding,
                     dynamic_embedding_kwargs=dynamic_embedding_kwargs,
                     normalization=normalization,
+                    norm_after=norm_after,
                     scale_factor=scale_factor,
                     env_name=env_name,
                     use_pos_token=use_pos_token,
                     use_decoder_mha_mask=use_decoder_mha_mask,
                     use_ham_encoder=use_ham_encoder,
                     pointer_check_nan=pointer_check_nan,
-                    parallel_gated_kwargs=parallel_gated_kwargs,
-                ) for stage_idx in range(self.stage_cnt)
+                    agent_handler=agent_handler,
+                    agent_handler_kwargs=agent_handler_kwargs,
+                    use_init_logp=use_init_logp,
+                    mask_handled=mask_handled,
+                )
+                for stage_idx in range(self.stage_cnt)
             ]
         )
 
@@ -291,9 +317,10 @@ class PARCOMultiStagePolicy(nn.Module):
         self.val_decode_type = val_decode_type
         self.test_decode_type = test_decode_type
 
-
-    def pre_forward(self, td: TensorDict, env: FFSPEnv, num_starts: int):
+    def pre_forward(self, td: TensorDict, env, num_starts: int, decode_type):
         # exclude the dummy node and split into stage tables
+        n_agents = td["job_duration"].size(-1)
+        num_jobs = td["job_duration"].size(-2) - 1
         run_time_list = td["job_duration"][:, :-1].chunk(env.num_stage, dim=-1)
         for stage_idx in range(self.stage_cnt):
             td["cost_matrix"] = run_time_list[stage_idx]
@@ -303,70 +330,102 @@ class PARCOMultiStagePolicy(nn.Module):
         if num_starts > 1:
             # repeat num_start times
             td = batchify(td, num_starts)
-            
+
         # update machine idx and action mask
         td = env.pre_step(td)
+
+        self.decode_strategy: PARCODecodingStrategy = parco_get_decoding_strategy(
+            decode_type,
+            num_agents=n_agents,
+            agent_handler=self.agent_handler,
+            use_init_logp=self.use_init_logp,
+            mask_handled=self.mask_handled,
+            replacement_value_key="wait_action",
+            tanh_clipping=10,
+        )
+
+        self.decode_strategy = PARCO4FFSPDecoding(
+            num_ma=n_agents, num_job=num_jobs, tanh_clipping=10, use_pos_token=True
+        )
 
         return td
 
     def forward(
         self,
         td: TensorDict,
-        env: FFSPEnv,
+        env,
         phase="train",
         num_starts=1,
         return_actions: bool = False,
+        return_sum_log_likelihood: bool = True,
         **decoder_kwargs,
     ):
-
         # Get decode type depending on phase
         decode_type = getattr(self, f"{phase}_decode_type")
-        device = td.device
 
-        td = self.pre_forward(td, env, num_starts)
+        td = self.pre_forward(td, env, num_starts, decode_type)
 
         # NOTE: this must come after pre_forward due to batchify op
         # collect some data statistics
         bs, total_mas, num_jobs_plus_one = td["full_action_mask"].shape
         num_jobs = num_jobs_plus_one - 1
-        num_ma = total_mas // self.stage_cnt
+        n_stage_mas = total_mas // self.stage_cnt
 
-        logp_list = torch.zeros(size=(bs, 0), device=device)
-        action_list = []
-
+        steps = 0
         while not td["done"].all():
-
-            actions = torch.full(size=(bs, total_mas), fill_value=num_jobs, device=device)
-            prob_stack = []
             action_stack = []
             for stage_idx in range(self.stage_cnt):
                 model = self.stage_models[stage_idx]
                 action_mask_list = td["full_action_mask"].chunk(self.stage_cnt, dim=1)
                 td["action_mask"] = action_mask_list[stage_idx]
-                td = model(td, decode_type)
+                logits = model(td)
+                td["wait_action"] = torch.full(
+                    (bs, n_stage_mas),
+                    fill_value=num_jobs,
+                    dtype=torch.long,
+                    device=td.device,
+                )
+                td = self.decode_strategy.step(
+                    logits,
+                    td["action_mask"],
+                    td,
+                    agent_handler_kwargs={"randomize": self.training},
+                )
+                action = td.pop("action")
+                action_stack.append(action)
 
-                if td["action"] is not None:
-                    prob_stack.append(td["probs"])
-                    action_stack.append(td["action"])
-
-            td["action"] = torch.cat(action_stack, dim=-1)
-            logp = torch.cat(prob_stack, dim=-1).log()
-
+            action_stack = torch.cat(action_stack, dim=-1)
+            td.set("action", action_stack)
             td = env.step(td)["next"]
+            steps += 1
 
-            logp_list = torch.cat((logp_list, logp), dim=1)
-            action_list.append(actions)
+        # Post-decoding hook: used for the final step(s) of the decoding strategy
+        (
+            logprobs,
+            actions,
+            td,
+            env,
+            halting_ratio,
+        ) = self.decode_strategy.post_decoder_hook(td, env)
 
-        out = {
+        outdict = {
             "reward": td["reward"],
-            "log_likelihood": logp_list.sum(1),
+            "log_likelihood": get_log_likelihood(
+                logprobs,
+                actions=None,
+                mask=td.get("mask", None),
+                return_sum=return_sum_log_likelihood,
+            ).sum(1),
+            "halting_ratio": halting_ratio,
         }
 
         if return_actions:
-            out["actions"] = torch.stack(action_list, 1)
+            outdict["actions"] = actions
 
-        return out
-    
+        outdict["steps"] = steps  # Number of steps taken during decoding
+
+        return outdict
+
 
 class OneStageModel(nn.Module):
     def __init__(
@@ -382,9 +441,10 @@ class OneStageModel(nn.Module):
         init_embedding_kwargs: dict = {},
         context_embedding: nn.Module = None,
         context_embedding_kwargs: dict = {},
-        dynamic_embedding: nn.Module = None, 
+        dynamic_embedding: nn.Module = None,
         dynamic_embedding_kwargs: dict = {},
         normalization: str = "instance",
+        norm_after: bool = False,
         scale_factor: float = 100,
         env_name: str = "ffsp",
         use_pos_token: bool = True,
@@ -395,17 +455,18 @@ class OneStageModel(nn.Module):
         agent_handler_kwargs: dict = {},  # Agent handler kwargs
         use_init_logp: bool = True,  # Return initial logp for actions even with conflicts
         mask_handled: bool = False,  # Mask out handled actions (make logprobs 0)
-        replacement_value_key: str = "current_node",  # When stopping arises (conflict or POS token), replace the value of this key
-        parallel_gated_kwargs: dict = None,  # ParallelGatedMLP kwargs
-        **transformer_kwargs
+        **transformer_kwargs,
     ):
         super().__init__()
         self.stage_idx = stage_idx
         self.num_stages = num_stages
-
+        if agent_handler is not None:
+            if isinstance(agent_handler, str):
+                agent_handler = get_agent_handler(agent_handler, **agent_handler_kwargs)
+        self.agent_handler = agent_handler
 
         self.encoder = MatNetEncoder(
-            stage_idx, 
+            stage_idx,
             embed_dim=embed_dim,
             num_heads=num_heads,
             num_layers=num_encoder_layers,
@@ -415,9 +476,9 @@ class OneStageModel(nn.Module):
             init_embedding=init_embedding,
             init_embedding_kwargs=init_embedding_kwargs,
             scale_factor=scale_factor,
-            parallel_gated_kwargs=parallel_gated_kwargs,
             use_ham=use_ham_encoder,
-            **transformer_kwargs
+            norm_after=norm_after,
+            **transformer_kwargs,
         )
 
         self.decoder = MatNetDecoder(
@@ -432,38 +493,27 @@ class OneStageModel(nn.Module):
             dynamic_embedding=dynamic_embedding,
             dynamic_embedding_kwargs=dynamic_embedding_kwargs,
             mask_inner=use_decoder_mha_mask,
-            check_nan=pointer_check_nan
+            check_nan=pointer_check_nan,
         )
 
+        # Multi-agent handling
         self.use_pos_token = use_pos_token
-
+        self.mask_handled = mask_handled
+        self.use_init_logp = use_init_logp
 
     def pre_forward(self, td, env, num_starts):
         embeddings = self.encoder(td)
         # encoded_row.shape: (batch, job_cnt, embedding)
         # encoded_col.shape: (batch, machine_cnt, embedding)
-        td, env, cached = self.decoder.pre_decoder_hook(td, env, embeddings, num_starts=num_starts)
+        td, env, cached = self.decoder.pre_decoder_hook(
+            td, env, embeddings, num_starts=num_starts
+        )
         self.cache = cached
 
         self.num_job = embeddings[0].size(1)
         self.num_ma = embeddings[1].size(1)
 
-        self.decoding_strat = PARCO4FFSPDecoding(
-            self.stage_idx, 
-            num_ma=self.num_ma, 
-            num_job=self.num_job,
-            use_pos_token=self.use_pos_token
-        )
-
-    def forward(self, td: TensorDict, decode_type, num_starts: int = 0):
-        # shape: (batch, num_agents, job_cnt+1)
-        mask = ~td["action_mask"].clone()
-        # adjust action mask for pointer attention in RL4CO PointerMHA module
-        attention_mask = td["action_mask"][...,:-1]
-        td["action_mask"] = attention_mask
+    def forward(self, td: TensorDict, num_starts: int = 0):
         # shape: (batch, num_agents, job_cnt+1)
         logits, _ = self.decoder(td, self.cache, num_starts=num_starts)
-
-        td = self.decoding_strat.step(logits, mask, td, decode_type=decode_type)
-
-        return td
+        return logits

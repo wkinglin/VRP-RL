@@ -77,9 +77,9 @@ class AgentHandler(abc.ABC):
         mask = mask_sorted.gather(1, indices1.argsort(dim=1))
 
         # If exclude_values is provided, we set their mask to False so that they are not replaced
-        if self.exclude_values is not None:
-            self.exclude_values = self.exclude_values.to(actions.device)
-            mask = mask & ~torch.isin(actions, self.exclude_values)
+        if exclude_values is not None:
+            exclude_values = exclude_values.to(actions.device)
+            mask = mask & ~torch.isin(actions, exclude_values)
 
         # Replace values in the original actions using the mask
         if isinstance(replacement_value, int):
@@ -130,12 +130,34 @@ class ClosestAgentHandler(AgentHandler):
 class HighestProbabilityAgentHandler(AgentHandler):
     """Highest probability agent in dim 1 is selected in case of conflicts"""
 
-    def _preprocess_actions(self, actions: torch.Tensor, td, probs) -> torch.Tensor:
+    def _preprocess_actions(
+        self, actions: torch.Tensor, td, probs, randomize: bool = False
+    ) -> torch.Tensor:
         # sort indices by probability
         action_probs = gather_by_index(probs, actions, dim=-1)
+        if randomize:
+            # Add Gumbel noise to probabilities to randomize selection
+            # This may be useful for exploration
+            gumbel_noise = -torch.log(-torch.log(torch.rand_like(action_probs)))
+            action_probs += gumbel_noise
+        # Sort indices by action probabilities
         _, indices = torch.sort(action_probs, dim=-1, descending=True, stable=True)
         sorted_actions = gather_by_index(actions, indices)
         return sorted_actions, indices
+
+
+class POSAgentHandler(AgentHandler):
+    """Agent with **lowest** probability of selecting the POS action is put first"""
+
+    def _preprocess_actions(
+        self, actions: torch.Tensor, td, probs=None, **kwargs
+    ) -> torch.Tensor:
+        # note: actually logprobs
+        _, sort_pos_indices = probs.sort(
+            dim=-1, descending=False
+        )  # False cuz lowest POS has to be selected
+        sorted_actions = gather_by_index(actions, sort_pos_indices)
+        return sorted_actions, sort_pos_indices
 
 
 class SmallestPathToClosure(AgentHandler):
@@ -185,6 +207,7 @@ AGENT_HANDLER_REGISTRY = {
     "closest": ClosestAgentHandler,
     "highprob": HighestProbabilityAgentHandler,
     "smallestpath": SmallestPathToClosure,
+    "pos": POSAgentHandler,
     "none": NoHandler,
 }
 

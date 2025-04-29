@@ -14,19 +14,50 @@ log = get_pylogger(__name__)
 
 
 class RMSNorm(nn.Module):
-    """From https://github.com/meta-llama/llama-models"""
+    """
+    Root Mean Square Layer Normalization (RMSNorm).
+    https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
 
-    def __init__(self, dim: int, eps: float = 1e-5, **kwargs):
+    Args:
+        dim (int): Dimension of the input tensor.
+        eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6, **unused_kwargs):
         super().__init__()
+        self.dim = dim
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    def forward(self, x: torch.Tensor):
+        return F.rms_norm(x, (self.dim,), self.weight, self.eps)
 
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # Note: done because in previous RMS norm implementation, the dim parameter was not being loaded
+        weight_key = prefix + "weight"
+        if weight_key in state_dict:
+            weight = state_dict[weight_key]
+            if not hasattr(self, "dim"):
+                self.dim = weight.size(0)
+                self.weight = nn.Parameter(torch.ones(self.dim, device=weight.device))
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
 
 class Normalization(nn.Module):
@@ -115,8 +146,8 @@ class ParallelGatedMLP(nn.Module):
         )
 
     def forward(self, z):
-        z1, z2 = self.l1(z), self.l2(z)
-        return self.l3(self.act(z1) * z2)
+        # https://github.com/deepseek-ai/DeepSeek-V3/blob/b5d872ead062c94b852d75ce41ae0b10fcfa1c86/inference/model.py#L529
+        return self.l3(self.act(self.l1(z)) * self.l2(z))
 
 
 class TransformerBlock(nn.Module):

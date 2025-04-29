@@ -1,13 +1,15 @@
 from typing import Tuple, Union
 
+import torch
 import torch.nn as nn
 
 from tensordict import TensorDict
 from torch import Tensor
 
 from parco.models.env_embeddings import env_init_embedding
+from parco.models.nn.matnet import MatNetLayer
 from parco.models.nn.transformer import Normalization, TransformerBlock
-from parco.models.nn.matnet import MatNetLayer, HAMEncoderLayer
+
 
 class PARCOEncoder(nn.Module):
     def __init__(
@@ -21,6 +23,8 @@ class PARCOEncoder(nn.Module):
         init_embedding: nn.Module = None,
         init_embedding_kwargs: dict = {},
         norm_after: bool = False,
+        use_pos_token: bool = False,
+        trainable_pos_token: bool = True,
         **transformer_kwargs,
     ):
         super(PARCOEncoder, self).__init__()
@@ -46,6 +50,13 @@ class PARCOEncoder(nn.Module):
             )
         )
 
+        if use_pos_token and trainable_pos_token:
+            self.pos_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        elif use_pos_token:
+            self.pos_token = torch.zeros(1, 1, embed_dim)
+        else:
+            self.pos_token = None
+        self.use_pos_token = use_pos_token
         self.norm = Normalization(embed_dim, normalization) if use_final_norm else None
 
     def forward(
@@ -53,6 +64,12 @@ class PARCOEncoder(nn.Module):
     ) -> Tuple[Tensor, Tensor]:
         # Transfer to embedding space
         init_h = self.init_embedding(td)  # [B, N, H]
+
+        if self.use_pos_token:
+            # Add a POS (pause-of-sequence) action to the embeddings
+            # [B, N, H] -> [B, N+1, H]
+            pos_token = self.pos_token.expand(init_h.size(0), 1, -1).to(td.device)
+            init_h = torch.cat([init_h, pos_token], dim=1)
 
         # Process embedding
         h = init_h
@@ -81,8 +98,8 @@ class MatNetEncoder(nn.Module):
         normalization: str = "instance",
         init_embedding: nn.Module = None,
         init_embedding_kwargs: dict = {},
-        scale_factor: float = 1.,
-        parallel_gated_kwargs: dict = None,
+        norm_after: bool = False,
+        scale_factor: float = 10.0,
         use_ham: bool = True,
         **transformer_kwargs,
     ):
@@ -96,22 +113,18 @@ class MatNetEncoder(nn.Module):
             if init_embedding is not None
             else env_init_embedding(self.env_name, init_embedding_kwargs)
         )
-        if use_ham:
-            LayerCls = HAMEncoderLayer
-        else:
-            LayerCls = MatNetLayer
-        
+
         self.layers = nn.ModuleList(
             [
-                LayerCls(
+                MatNetLayer(
                     embed_dim=embed_dim,
-                    head_num=num_heads,
+                    num_heads=num_heads,
                     ms_hidden_dim=ms_hidden_dim,
                     feedforward_hidden=feedforward_hidden,
                     normalization=normalization,
-                    parallel_gated_kwargs=parallel_gated_kwargs,
-                    **transformer_kwargs
-                ) 
+                    norm_after=norm_after,
+                    **transformer_kwargs,
+                )
                 for _ in range(num_layers)
             ]
         )
@@ -123,9 +136,5 @@ class MatNetEncoder(nn.Module):
         row_emb, col_emb = self.init_embedding(proc_times)
         proc_times = proc_times / self.scale_factor
         for layer in self.layers:
-            row_emb, col_emb = layer(
-                row_emb, 
-                col_emb, 
-                proc_times
-            )
+            row_emb, col_emb = layer(row_emb, col_emb, proc_times)
         return row_emb, col_emb

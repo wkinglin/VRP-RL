@@ -1,4 +1,5 @@
 from typing import Tuple
+
 import torch
 import torch.nn as nn
 
@@ -25,16 +26,17 @@ class PARCODecoder(AttentionModelDecoder):
         dynamic_embedding: nn.Module = None,
         dynamic_embedding_kwargs: dict = {},
         use_graph_context: bool = False,
+        use_pos_token: bool = False,
         **kwargs,
     ):
+        self.use_pos_token = use_pos_token
         context_embedding_kwargs["embed_dim"] = embed_dim  # replace
         if context_embedding is None:
-            context_embedding = env_context_embedding(
-                env_name, context_embedding_kwargs)
+            context_embedding = env_context_embedding(env_name, context_embedding_kwargs)
 
+        dynamic_embedding_kwargs["embed_dim"] = embed_dim  # replace
         if dynamic_embedding is None:
-            dynamic_embedding = env_dynamic_embedding(
-                env_name, dynamic_embedding_kwargs)
+            dynamic_embedding = env_dynamic_embedding(env_name, dynamic_embedding_kwargs)
 
         if use_graph_context:
             raise ValueError("PARCO does not use graph context")
@@ -81,19 +83,37 @@ class PARCODecoder(AttentionModelDecoder):
             glimpse_q = glimpse_q.reshape(batch_size, -1, self.embed_dim)
             mask = mask.reshape(batch_size, glimpse_q.shape[1], -1)
 
+        if self.use_pos_token:
+            # Add a POS (pause-of-sequence) action always available
+            # [B, m, N] -> [B, m, N+1]
+            mask = torch.cat([mask, torch.ones_like(mask[..., :1])], dim=-1)
+
         # Compute logits
         logits = self.pointer(glimpse_q, glimpse_k, glimpse_v, logit_k, mask)
 
         # For passing to the next step commnuication layer, reshape logits and mask to [B*S, m, N] if num_starts > 1
         if num_starts > 1:
-            logits = logits.reshape(
-                batch_size * num_starts, -1, logits.shape[-1])
+            logits = logits.reshape(batch_size * num_starts, -1, logits.shape[-1])
+            # print("final logits shape", logits.shape)
+            # TODO: useless?
             mask = mask.reshape(batch_size * num_starts, -1, mask.shape[-1])
-            glimpse_q = glimpse_q.reshape(
-                batch_size * num_starts, -1, glimpse_q.shape[-1]
-            )
-
+            # TODO: useless?
+            # glimpse_q = glimpse_q.reshape(batch_size*num_starts, -1, glimpse_q.shape[-1])
         return logits, mask
+
+    def _compute_q(self, cached: PrecomputedCache, td: TensorDict):
+        node_embeds_cache = cached.node_embeddings
+        graph_context_cache = cached.graph_context
+
+        if td.dim() == 2 and isinstance(graph_context_cache, Tensor):
+            graph_context_cache = graph_context_cache.unsqueeze(1)
+
+        step_context = self.context_embedding(node_embeds_cache, td)
+        glimpse_q = step_context + graph_context_cache
+        # add seq_len dim if not present
+        glimpse_q = glimpse_q.unsqueeze(1) if glimpse_q.ndim == 2 else glimpse_q
+
+        return glimpse_q
 
     def pre_decoder_hook(
         self, td, env, embeddings, num_starts: int = 0
@@ -114,39 +134,44 @@ class MatNetDecoder(PARCODecoder):
     def __init__(
         self,
         stage_idx: int,
-        stage_cnt: int, 
+        stage_cnt: int,
         embed_dim: int = 256,
-        num_heads: int = 16, 
+        num_heads: int = 16,
         scale_factor: int = 10,
-        env_name: str = "ffsp", 
+        env_name: str = "ffsp",
         context_embedding: nn.Module = None,
-        context_embedding_kwargs: dict = {}, 
-        dynamic_embedding: nn.Module = None, 
+        context_embedding_kwargs: dict = {},
+        dynamic_embedding: nn.Module = None,
         dynamic_embedding_kwargs: dict = {},
-        **kwargs
+        **kwargs,
     ):
-        
-        context_embedding_kwargs.update({
-            "stage_idx": stage_idx,
-            "stage_cnt": stage_cnt,
-            "embed_dim": embed_dim,
-            "scale_factor": scale_factor,
-        })
 
-        dynamic_embedding_kwargs.update({
-            "embed_dim": embed_dim
-        })
+        context_embedding_kwargs.update(
+            {
+                "stage_idx": stage_idx,
+                "stage_cnt": stage_cnt,
+                "embed_dim": embed_dim,
+                "scale_factor": scale_factor,
+            }
+        )
+
+        dynamic_embedding_kwargs.update(
+            {
+                "embed_dim": embed_dim,
+                "scale_factor": scale_factor,
+            }
+        )
 
         super(MatNetDecoder, self).__init__(
-            embed_dim=embed_dim, 
-            num_heads=num_heads, 
-            env_name=env_name, 
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            env_name=env_name,
             context_embedding=context_embedding,
-            context_embedding_kwargs=context_embedding_kwargs, 
-            dynamic_embedding=dynamic_embedding, 
+            context_embedding_kwargs=context_embedding_kwargs,
+            dynamic_embedding=dynamic_embedding,
             dynamic_embedding_kwargs=dynamic_embedding_kwargs,
-            use_graph_context=False, 
-            **kwargs
+            use_graph_context=False,
+            **kwargs,
         )
 
         self.stage_idx = stage_idx
@@ -155,6 +180,9 @@ class MatNetDecoder(PARCODecoder):
 
     def _precompute_cache(self, embeddings: Tuple[Tensor, Tensor], num_starts: int = 0):
         job_emb, ma_emb = embeddings
+        # add embedding for "waiting action" to job embeddings
+        encoded_no_job = self.no_job_emb.expand(job_emb.size(0), 1, -1)
+        job_emb_w_dummy = torch.cat((job_emb, encoded_no_job), dim=1)
 
         queries = self.project_agent_embeddings(ma_emb)
 
@@ -162,7 +190,9 @@ class MatNetDecoder(PARCODecoder):
             glimpse_key_fixed,
             glimpse_val_fixed,
             logit_key,
-        ) = self.project_node_embeddings(job_emb).chunk(3, dim=-1)
+        ) = self.project_node_embeddings(
+            job_emb_w_dummy
+        ).chunk(3, dim=-1)
 
         # Organize in a dataclass for easy access
         return PrecomputedCache(
@@ -172,21 +202,13 @@ class MatNetDecoder(PARCODecoder):
             glimpse_val=glimpse_val_fixed,
             logit_key=logit_key,
         )
-    
-    def _compute_kvl(self, cached: PrecomputedCache, td: TensorDict):
-        bs = td.batch_size
-        glimpse_k, glimpse_v, logit_k = super()._compute_kvl(cached, td)
-        encoded_no_job = self.no_job_emb.expand(*bs, 1, -1)
-        # shape: (batch, pomo, jobs+1, embedding)
-        logit_k_w_dummy = torch.cat((logit_k, encoded_no_job), dim=1)
-        return glimpse_k, glimpse_v, logit_k_w_dummy
 
     def pre_decoder_hook(
         self, td, env, embeddings, num_starts: int = 0
     ) -> Tuple[TensorDict, RL4COEnvBase, PrecomputedCache]:
         """Precompute the embeddings cache before the decoder is called"""
         cached = self._precompute_cache(embeddings, num_starts=num_starts)
-        
+
         has_dyn_emb_multi_start = self.is_dynamic_embedding and num_starts > 1
 
         # Handle efficient multi-start decoding
