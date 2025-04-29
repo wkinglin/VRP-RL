@@ -2,6 +2,8 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2409.03811-b31b1b.svg)](https://arxiv.org/abs/2409.03811) [![Slack](https://img.shields.io/badge/slack-chat-611f69.svg?logo=slack)](https://join.slack.com/t/rl4co/shared_invite/zt-1ytz2c1v4-0IkQ8NQH4TRXIX8PrRmDhQ)
 [![License: MIT](https://img.shields.io/badge/License-MIT-red.svg)](https://opensource.org/licenses/MIT)
+[![HuggingFace Dataset](https://img.shields.io/badge/%F0%9F%A4%97-Dataset-yellow)](https://huggingface.co/ai4co/parco)
+[![HuggingFace Models](https://img.shields.io/badge/%F0%9F%A4%97-Models-yellow)](https://huggingface.co/datasets/ai4co/parco)
 
 Code repository for "PARCO: Learning Parallel Autoregressive Policies for Efficient Multi-Agent Combinatorial Optimization"
 
@@ -23,22 +25,18 @@ Code repository for "PARCO: Learning Parallel Autoregressive Policies for Effici
 
 ### Installation
 
+We use [uv](https://docs.astral.sh/uv/getting-started/installation/) for fast installation and dependency management:
+
 ```bash
-pip install -e .
+uv venv
+source .venv/bin/activate
+uv sync --all-extras
 ```
 
-Note: we recommend using a virtual environment. Using Conda:
+To download the data and checkpoints from HuggingFace automatically, you can use:
 
 ```bash
-conda create -n parco
-conda activate parco
-```
-
-### Data generation
-You can generate data using the `generate_data.py`, which will automatically generate all the data we use for training and testing:
-
-```bash
-python generate_data.py
+python scripts/download_hf.py
 ```
 
 ### Quickstart Notebooks
@@ -75,6 +73,12 @@ python test.py --problem hcvrp --decode_type greedy --batch_size 128
 ```bash
 python test.py --problem hcvrp --decode_type sampling --batch_size 1 --sample_size 1280
 ```
+
+### Other scripts
+
+- Data generation: We also include scripts to re-generate data manually (reproducible via random seeds) with `python scripts/generate_data.py`.
+
+- OR-Tools: We additionally include a script to solve the problem using OR-Tools with `python scripts/run_ortools.py`.
 
 
 ## 🤩 Citation
