@@ -23,6 +23,11 @@ dependencies = [
 requires-python = ">=3.10"
 readme = "README.md"
 
+[project.optional-dependencies]
+dev = ["black", "pre-commit", "ruff", "pytest"]
+solver = [
+    "ortools>=9.10.4067",
+]
 
 [tool.black]
 line-length = 90
