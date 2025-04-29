@@ -70,6 +70,16 @@ if __name__ == "__main__":
         ), "Greedy decoding only uses 1 sample"
     if opts.datasets is None:
         assert problem is not None, "Problem must be specified if dataset is not provided"
+        if not os.path.exists(f"./data/{problem}"):
+            print("Data not found, downloading from HuggingFace...")
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                "ai4co/parco",
+                allow_patterns=["data/*"],
+                local_dir=".",
+                repo_type="dataset",
+            )
         data_paths = [f"./data/{problem}/{f}" for f in os.listdir(f"./data/{problem}")]
     else:
         data_paths = [opts.datasets] if isinstance(opts.datasets, str) else opts.datasets
@@ -87,10 +97,17 @@ if __name__ == "__main__":
 
     # Load the checkpoint as usual
     print("Loading checkpoint from ", checkpoint_path)
+    # if not exists, download from huggingface
+    if not os.path.exists(checkpoint_path):
+        from huggingface_hub import snapshot_download
+
+        print("Checkpoint not found, downloading data from HuggingFace...")
+        snapshot_download("ai4co/parco", allow_patterns=["checkpoints/*"], local_dir=".")
+
+    print("Loading checkpoint from ", checkpoint_path)
     model = PARCORLModule.load_from_checkpoint(
         checkpoint_path, map_location="cpu", strict=False
     )
-    # env = model.env
     if problem == "hcvrp":
         env = HCVRPEnv()
     elif problem == "omdcpdp":
