@@ -7,6 +7,9 @@ outputs/
 /data/
 /notebooks/data/
 
+# Checkpoints
+checkpoints/
+
 
 #cache
 cache/
