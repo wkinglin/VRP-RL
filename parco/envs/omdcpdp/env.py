@@ -6,7 +6,7 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.utils.ops import gather_by_index
 from rl4co.utils.pylogger import get_pylogger
 from tensordict.tensordict import TensorDict
-from torchrl.data import BoundedTensorSpec, UnboundedContinuousTensorSpec
+from torchrl.data import Bounded, Unbounded
 
 from .generator import OMDCPDPGenerator
 from .render import render
@@ -62,6 +62,10 @@ class OMDCPDPEnv(RL4COEnvBase):
         **kwargs,
     ):
         kwargs["check_solution"] = check_solution
+        if kwargs["check_solution"]:
+            log.warning(
+                "Check solution is enabled, this will slow down the training/testing and should be used for debugging purposes only."
+            )
         super().__init__(**kwargs)
         if generator is None:
             generator = OMDCPDPGenerator(**generator_params)
@@ -429,8 +433,8 @@ class OMDCPDPEnv(RL4COEnvBase):
 
     def _make_spec(self, td_params: TensorDict = None):
         # Looks like this is needed somehow
-        self.reward_spec = UnboundedContinuousTensorSpec(shape=(1,))
-        self.done_spec = BoundedTensorSpec(shape=(1,), dtype=torch.bool, low=0, high=1)
+        self.reward_spec = Unbounded(shape=(1,))
+        self.done_spec = Bounded(shape=(1,), dtype=torch.bool, low=0, high=1)
         pass
 
     @staticmethod

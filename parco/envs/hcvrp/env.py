@@ -6,12 +6,7 @@ from rl4co.envs.common.base import RL4COEnvBase
 from rl4co.utils.ops import gather_by_index, get_distance
 from rl4co.utils.pylogger import get_pylogger
 from tensordict.tensordict import TensorDict
-from torchrl.data import (
-    BoundedTensorSpec,
-    CompositeSpec,
-    UnboundedContinuousTensorSpec,
-    UnboundedDiscreteTensorSpec,
-)
+from torchrl.data import Bounded, Composite, Unbounded
 
 from .generator import HCVRPGenerator
 from .render import render
@@ -61,8 +56,14 @@ class HCVRPEnv(RL4COEnvBase):
         self,
         generator: HCVRPGenerator = None,
         generator_params: dict = {},
+        check_solution: bool = False,
         **kwargs,
     ):
+        kwargs["check_solution"] = check_solution
+        if kwargs["check_solution"]:
+            log.warning(
+                "Check solution is enabled, this will slow down the training/testing and should be used for debugging purposes only."
+            )
         super().__init__(**kwargs)
         if generator is None:
             generator = HCVRPGenerator(**generator_params)
@@ -282,45 +283,37 @@ class HCVRPEnv(RL4COEnvBase):
         # TODO: double check the validity of the demand
 
     def _make_spec(self, generator: HCVRPGenerator):
-        self.observation_spec = CompositeSpec(
-            locs=BoundedTensorSpec(
+        self.observation_spec = Composite(
+            locs=Bounded(
                 low=generator.min_loc,
                 high=generator.max_loc,
                 shape=(generator.num_loc + 1, 2),
                 dtype=torch.float32,
-                device=self.device,
             ),
-            current_node=UnboundedDiscreteTensorSpec(
+            current_node=Unbounded(
                 shape=(1),
                 dtype=torch.int64,
-                device=self.device,
             ),
-            demand=BoundedTensorSpec(
+            demand=Bounded(
                 low=-generator.min_demand,
                 high=generator.max_demand,
                 shape=(generator.num_loc + 1, 1),
                 dtype=torch.float32,
-                device=self.device,
             ),
-            action_mask=UnboundedDiscreteTensorSpec(
+            action_mask=Unbounded(
                 shape=(generator.num_loc + 1, 1),
                 dtype=torch.bool,
-                device=self.device,
             ),
             shape=(),
-            device=self.device,
         )
-        self.action_spec = BoundedTensorSpec(
+        self.action_spec = Bounded(
             shape=(1,),
             dtype=torch.int64,
             low=0,
             high=generator.num_loc + 1,
-            device=self.device,
         )
-        self.reward_spec = UnboundedContinuousTensorSpec(shape=(1,), device=self.device)
-        self.done_spec = UnboundedDiscreteTensorSpec(
-            shape=(1,), dtype=torch.bool, device=self.device
-        )
+        self.reward_spec = Unbounded(shape=(1,))
+        self.done_spec = Unbounded(shape=(1,), dtype=torch.bool)
 
     @staticmethod
     def render(td: TensorDict, actions: torch.Tensor = None, ax=None, **kwargs):

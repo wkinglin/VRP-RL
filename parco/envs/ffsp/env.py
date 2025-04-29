@@ -1,18 +1,12 @@
 from math import factorial
 from typing import Optional
-from einops import rearrange, reduce
+
 import torch
 
-from tensordict.tensordict import TensorDict
-from torchrl.data import (
-    BoundedTensorSpec,
-    CompositeSpec,
-    UnboundedContinuousTensorSpec,
-    UnboundedDiscreteTensorSpec,
-)
-
+from einops import rearrange, reduce
 from rl4co.data.dataset import FastTdDataset
 from rl4co.envs.common.base import RL4COEnvBase
+from tensordict.tensordict import TensorDict
 
 from .generator import FFSPGenerator
 
@@ -70,7 +64,7 @@ class FFSPEnv(RL4COEnvBase):
         self.stage_table = torch.tensor(
             [ma for ma in list(range(self.num_stage)) for _ in range(self.num_machine)],
             device=self.device,
-            dtype=torch.long
+            dtype=torch.long,
         )
 
     def get_num_starts(self, td):
@@ -78,7 +72,6 @@ class FFSPEnv(RL4COEnvBase):
 
     def select_start_nodes(self, td, num_starts):
         raise NotImplementedError("Shdsu")
-
 
     def pre_step(self, td: TensorDict) -> TensorDict:
         self.stage_table = self.stage_table.to(td.device)
@@ -96,11 +89,11 @@ class FFSPEnv(RL4COEnvBase):
             size=(*batch_size, self.num_machine_total, self.num_job),
             fill_value=False,
             dtype=torch.bool,
-            device=td.device
+            device=td.device,
         )
 
         # shape: (batch, job)
-        job_loc = td["job_location"][:, :self.num_job]
+        job_loc = td["job_location"][:, : self.num_job]
         # shape: (batch, 1, job)
         job_finished = (job_loc >= self.num_stage).unsqueeze(-2).expand_as(mask)
 
@@ -112,28 +105,23 @@ class FFSPEnv(RL4COEnvBase):
 
         mask = rearrange(mask, "b (s m) j -> b s m j", s=self.num_stage)
         # add mask for wait, which is allowed if machine cannot process any job
-        mask = torch.cat(
-            (mask, ~reduce(mask, "... j -> ... 1", "all")), 
-            dim=-1
-        )
+        mask = torch.cat((mask, ~reduce(mask, "... j -> ... 1", "all")), dim=-1)
         mask = rearrange(mask, "b s m j -> b (s m) j")
-        
-        td.update({
-            "full_action_mask": ~mask
-        })
+
+        td.update({"full_action_mask": ~mask})
 
         return td
-
 
     def _step(self, td: TensorDict) -> TensorDict:
 
         batch_size = td.batch_size
         batch_idx = torch.arange(*batch_size, dtype=torch.long, device=td.device)
         actions = td["action"].split(1, dim=-1)
+        assert len(actions) == self.num_machine_total
+        for machine_idx, job_idx in enumerate(actions):
+            job_idx = job_idx.squeeze(1)
+            machine_idx = torch.full_like(job_idx, fill_value=machine_idx)
 
-        for action in actions:
-            job_idx = torch.flatten(action["jobs"].squeeze(-1))
-            machine_idx = torch.flatten(action["mas"].squeeze(-1))
             skip = job_idx == self.num_job
             if skip.all():
                 continue
@@ -158,7 +146,9 @@ class FFSPEnv(RL4COEnvBase):
             # shape: (batch, job+1)
             td["job_location"][b_idx, job_idx] += 1
             # shape: (batch)
-            td["done"] = (td["job_location"][:, :self.num_job] >= self.num_stage).all(dim=-1)
+            td["done"] = (td["job_location"][:, : self.num_job] >= self.num_stage).all(
+                dim=-1
+            )
 
         ####################################
         all_done = td["done"].all()
@@ -169,7 +159,9 @@ class FFSPEnv(RL4COEnvBase):
             self._update_step_state(td)
 
         if all_done:
-            reward = -self._get_makespan(td)  # Note the MINUS Sign ==> We want to MAXIMIZE reward
+            reward = -self._get_makespan(
+                td
+            )  # Note the MINUS Sign ==> We want to MAXIMIZE reward
             # shape: (batch, pomo)
         else:
             reward = None
@@ -177,7 +169,6 @@ class FFSPEnv(RL4COEnvBase):
         td["reward"] = reward
 
         return td
-
 
     def _reset(
         self, td: Optional[TensorDict] = None, batch_size: Optional[list] = None
@@ -208,15 +199,12 @@ class FFSPEnv(RL4COEnvBase):
         job_duration[..., self.num_job, :] = 0
         # time information
         t_job_ready = torch.zeros(
-            size=(*batch_size, self.num_job+1), 
-            dtype=torch.long,
-            device=device
+            size=(*batch_size, self.num_job + 1), dtype=torch.long, device=device
         )
         t_ma_idle = torch.zeros(
-            size=(*batch_size, self.num_machine_total), 
-            dtype=torch.long,
-            device=device)
-        
+            size=(*batch_size, self.num_machine_total), dtype=torch.long, device=device
+        )
+
         # Finish status information
         reward = torch.full(
             size=(*batch_size,),
@@ -242,11 +230,10 @@ class FFSPEnv(RL4COEnvBase):
                 "job_duration": job_duration,
                 # Finish status information
                 "reward": reward,
-                "done": done
+                "done": done,
             },
             batch_size=batch_size,
         )
-
 
     def _get_makespan(self, td):
 
@@ -256,12 +243,11 @@ class FFSPEnv(RL4COEnvBase):
         end_schedule = td["schedule"] + job_durations_perm
 
         # shape: (batch, machine)
-        end_time_max, _ = end_schedule[:, :, :self.num_job].max(dim=-1)
+        end_time_max, _ = end_schedule[:, :, : self.num_job].max(dim=-1)
         # shape: (batch)
         end_time_max, _ = end_time_max.max(dim=-1)
 
         return end_time_max.float()
-    
 
     def _get_reward(self, td, actions) -> TensorDict:
         return td["reward"].float()
@@ -324,3 +310,20 @@ class FFSPEnv(RL4COEnvBase):
         shuffle(color_list)
         cmap = ListedColormap(color_list, N=color_cnt)
         return cmap
+
+    @staticmethod
+    def load_data(fpath, batch_size=[]):
+        """Dataset loading from file"""
+        data = torch.load(fpath)
+        run_times = torch.cat(data["problems_INT_list"], -1)
+        if batch_size:
+            batch_size = [batch_size] if isinstance(batch_size, int) else batch_size
+            run_times = run_times[: batch_size[0]]
+        else:
+            batch_size = [run_times.size(0)]
+        return TensorDict(
+            {
+                "run_time": run_times,
+            },
+            batch_size=batch_size,
+        )

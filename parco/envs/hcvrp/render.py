@@ -29,6 +29,10 @@ def render(td, actions=None, ax=None, plot_depot_transition=True, **kwargs):
         td["locs"][0, 0], td["locs"][0, 1], marker="s", color="r", s=100, label="Depot"
     )
 
+    # plot the idx if locs
+    for idx, loc in enumerate(td["locs"]):
+        ax.text(loc[0], loc[1], str(idx), fontsize=12)
+
     # Plot Customers
     ax.scatter(
         td["locs"][num_agents:, 0],
