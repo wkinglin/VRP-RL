@@ -35,4 +35,4 @@ jobs:
         uv sync --all-extras
 
     - name: Run pytest
-      run: pytest tests/*.py
+      run: python -m pytest tests/*.py
