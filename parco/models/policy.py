@@ -50,7 +50,7 @@ class PARCOPolicy(nn.Module):
         train_decode_type: str = "sampling",
         val_decode_type: str = "greedy",
         test_decode_type: str = "greedy",
-        agent_handler=None,  # Agent handler
+        agent_handler="highprob",  # Agent handler
         agent_handler_kwargs: dict = {},  # Agent handler kwargs
         use_init_logp: bool = True,  # Return initial logp for actions even with conflicts
         mask_handled: bool = False,  # Mask out handled actions (make logprobs 0)
@@ -65,9 +65,8 @@ class PARCOPolicy(nn.Module):
     ):
         super(PARCOPolicy, self).__init__()
 
-        if agent_handler is not None:
-            if isinstance(agent_handler, str):
-                agent_handler = get_agent_handler(agent_handler, **agent_handler_kwargs)
+        if isinstance(agent_handler, str):
+            agent_handler = get_agent_handler(agent_handler, **agent_handler_kwargs)
         self.agent_handler = agent_handler
 
         # If key is not provided, use default context kwargs
@@ -263,7 +262,7 @@ class PARCOMultiStagePolicy(nn.Module):
         agent_handler=None,  # Agent handler
         agent_handler_kwargs: dict = {},  # Agent handler kwargs
         use_init_logp: bool = False,  # Return initial logp for actions even with conflicts
-        mask_handled: bool = True,  # Mask out handled actions (make logprobs 0)
+        mask_handled: bool = False,  # Mask out handled actions (make logprobs 0)
         replacement_value_key: str = "current_node",  # When stopping arises (conflict or POS token), replace the value of this key
         **transformer_kwargs,
     ):
