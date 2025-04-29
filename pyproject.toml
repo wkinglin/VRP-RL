@@ -1,23 +1,28 @@
-[tool.poetry]
+[project]
 name = "parco"
-version = "0.1.0"
-description = "PARCO: Learning Parallel Autoregressive Policies for Efficient Multi-Agent Combinatorial Optimization"
+version = "0.2.0"
+description = "Parallel AutoRegressive Models for Multi-Agent Combinatorial Optimization"
 authors = [
-    "Federico Berto <berto.federico2@gmail.com>",
-    "Chuanbo Hua <cbhua@kaist.ac.kr>",
-    "Laurin Luttmann <laurin.luttmann@gmail.com>",
-    "Jiwoo Son",
-    "Junyoung Park",
-    "Kyuree Ahn",
-    "Changhyun Kwon",
-    "Lin Xie",
-    "Jinkyoo Park",
+    {name = "Federico Berto", email = "berto.federico2@gmail.com"},
+    {name = "Chuanbo Hua", email = "cbhua@kaist.ac.kr"},
+    {name = "Laurin Luttmann", email = "laurin.luttmann@gmail.com"},
+    {name = "Jiwoo Son"},
+    {name = "Junyoung Park"},
+    {name = "Kyuree Ahn"},
+    {name = "Changhyun Kwon"},
+    {name = "Lin Xie"},
+    {name = "Jinkyoo Park"}
 ]
 license = "MIT"
-packages = [{ include = "parco" }]
+dependencies = [
+    "rl4co>=0.5.2",
+    "ipykernel",
+    "ortools>=9.11.4210",
+    "huggingface-hub[cli]>=0.30.2",
+]
+requires-python = ">=3.10"
+readme = "README.md"
 
-[tool.poetry.dependencies]
-rl4co = {version = ">=0.5.0", extras = ["dev"]}
 
 [tool.black]
 line-length = 90
@@ -38,6 +43,19 @@ exclude = '''
   )/
 )
 '''
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = ["parco"]
+
+[tool.hatch.build.targets.wheel]
+include = ["parco"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.ruff]
 select = ["F", "E", "W", "I001"]
@@ -63,7 +81,3 @@ section-order = [
 combine-as-imports = true
 split-on-trailing-comma = false
 lines-between-types = 1
-
-[build-system]
-requires = ["poetry"]
-build-backend = "poetry.core.masonry.api"
