@@ -33,23 +33,42 @@ def generate_with_agents(problem, size_agents_dict, **kwargs):
 if __name__ == "__main__":
     data_dir = "data"
 
-    kwargs = {
+    ## Uncomment for generating data for the paper (mtsp, mpdp)
+    # We take the same as baselines
+    common_kwargs = {
         "data_dir": data_dir,
         "seed": 3333,
         "dataset_size": 100,
+        "graph_sizes": [50, 100, 200],
+    }
+
+    print("Generating instances for OMDCPDP...")
+    ## omdcpdp data
+    kwargs = {
+        "data_dir": data_dir,
+        "seed": 3333,
+        "dataset_size": 1000,
         "graph_sizes": 100,
         "num_agents": 100,  # NOTE: dummy, generate more for mixed graph sizes and agents training
     }
+    problem = "omdcpdp"
+    print(50 * "=" + f"\nGenerating instances for {problem.upper()}...\n" + 50 * "=")
+    # print smaller scales: 1000 instances
+    size_agents_dict = {
+        50: [5, 7, 10],
+        100: [10, 15, 20],
+    }
+    generate_with_agents(problem, size_agents_dict, **kwargs)
+    # large scale: 100 instances
+    size_agents_dict = {
+        500: [50, 75, 100],
+        1000: [100, 150, 200],
+    }
+    kwargs.update({"dataset_size": 100})
+    generate_with_agents(problem, size_agents_dict, **kwargs)
 
     problem = "hcvrp"
     print(50 * "=" + f"\nGenerating instances for {problem.upper()}...\n" + 50 * "=")
     kwargs.update({"seed": 24610, "dataset_size": 1280})  # same as 2D-Ptr paper
-    size_agents_dict = {60: [3, 5, 7], 80: [3, 5, 7], 100: [3, 5, 7]}
-    generate_with_agents(problem, size_agents_dict, **kwargs)
-
-    problem = "omdcpdp"
-    print(50 * "=" + f"\nGenerating instances for {problem.upper()}...\n" + 50 * "=")
-    # Note: results may differ slightly due to the different distribution we used, except for the provided Seoul dataset
-    # if needed, you may contact us for the exact distribution we used (it was created in PyTorch, hence not deterministic)
-    size_agents_dict = {50: [10, 18, 25], 100: [20, 35, 50], 200: [40, 70, 100]} 
+    size_agents_dict = {40: [3, 5, 7], 60: [3, 5, 7], 80: [3, 5, 7], 100: [3, 5, 7]}
     generate_with_agents(problem, size_agents_dict, **kwargs)
