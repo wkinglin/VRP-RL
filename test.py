@@ -8,17 +8,12 @@ import torch
 from rl4co.data.utils import load_npz_to_tensordict
 from tqdm.auto import tqdm
 
+from parco.envs import FFSPEnv, HCVRPEnv, OMDCPDPEnv
 from parco.models import PARCORLModule
 from parco.tasks.eval import get_dataloader
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Tricks for faster inference
-try:
-    torch._C._jit_set_profiling_executor(False)
-    torch._C._jit_set_profiling_mode(False)
-except AttributeError:
-    pass
 torch.set_float32_matmul_precision("medium")
 
 if __name__ == "__main__":
@@ -46,10 +41,12 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
-
-    # Use load_from_checkpoint with map_location, which is handled internally by Lightning
-    # Suppress FutureWarnings related to torch.load and weights_only
-    warnings.filterwarnings("ignore", message=".*weights_only.*", category=FutureWarning)
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Compile the model for faster inference",
+    )
 
     opts = parser.parse_args()
 
@@ -68,15 +65,24 @@ if __name__ == "__main__":
         ), "Problem must be specified if checkpoint is not provided"
         checkpoint_path = f"./checkpoints/{problem}/parco.ckpt"
     if decode_type == "greedy":
-        assert (sample_size == 1 or sample_size is None), "Greedy decoding only uses 1 sample"
+        assert (
+            sample_size == 1 or sample_size is None
+        ), "Greedy decoding only uses 1 sample"
     if opts.datasets is None:
         assert problem is not None, "Problem must be specified if dataset is not provided"
         data_paths = [f"./data/{problem}/{f}" for f in os.listdir(f"./data/{problem}")]
     else:
         data_paths = [opts.datasets] if isinstance(opts.datasets, str) else opts.datasets
     if decode_type == "sampling":
-        assert sample_size is not None, "Sample size must be specified for sampling decoding with --sample_size"
-        assert batch_size == 1, "Only batch_size=1 is supported for sampling decoding currently"
+        assert (
+            sample_size is not None
+        ), "Sample size must be specified for sampling decoding with --sample_size"
+        assert (
+            batch_size == 1
+        ), "Only batch_size=1 is supported for sampling decoding currently"
+
+    # exclude all the files with `sol` (solution files)
+    data_paths = [f for f in data_paths if "sol" not in f]
     data_paths = sorted(data_paths)  # Sort for consistency
 
     # Load the checkpoint as usual
@@ -84,8 +90,22 @@ if __name__ == "__main__":
     model = PARCORLModule.load_from_checkpoint(
         checkpoint_path, map_location="cpu", strict=False
     )
-    env = model.env
+    # env = model.env
+    if problem == "hcvrp":
+        env = HCVRPEnv()
+    elif problem == "omdcpdp":
+        env = OMDCPDPEnv()
+    elif problem == "ffsp":
+        env = FFSPEnv()
     policy = model.policy.to(device).eval()  # Use mixed precision if supported
+
+    # Compile the model - this will take more time but will speed up inference
+    # Can help for reporting better inference times (which is the business use case)
+    if opts.compile:
+        print("Compiling the model")
+        with torch.inference_mode():
+            # dummy pass
+            policy(env.reset(env.generator(1)).to(device), env, decode_type=decode_type)
 
     for dataset in data_paths:
         costs = []
@@ -96,7 +116,9 @@ if __name__ == "__main__":
         td_test = load_npz_to_tensordict(dataset)
         dataloader = get_dataloader(td_test, batch_size=batch_size)
 
-        with torch.cuda.amp.autocast() if "cuda" in opts.device else torch.inference_mode():  # Use mixed precision if supported
+        with (
+            torch.autocast("cuda") if "cuda" in opts.device else torch.inference_mode()
+        ):  # Use mixed precision if supported
             with torch.inference_mode():
                 for td_test_batch in tqdm(dataloader):
                     td_reset = env.reset(td_test_batch).to(device)
@@ -111,7 +133,7 @@ if __name__ == "__main__":
                     end_time = time.time()
                     inference_time = end_time - start_time
                     if decode_type == "greedy":
-                        costs.append(-out["reward"].mean().item())
+                        costs.extend(-out["reward"])
                     else:
                         costs.extend(
                             -out["reward"].reshape(-1, sample_size).max(dim=-1)[0]
