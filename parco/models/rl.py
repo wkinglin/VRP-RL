@@ -71,7 +71,7 @@ class PARCORLModule(SymNCO):
         self.env.generator.num_agents = self.train_max_agents
 
     def shared_step(
-        self, batch: Any, batch_idx: int, phase: str, dataloader_idx: int = None
+        self, batch: Any, batch_idx: int, phase: str, dataloader_idx: int = None, **kwargs
     ):
         # NOTE: deprecated
         num_agents = None  # done inside the sampling
@@ -117,6 +117,7 @@ class PARCORLModule(SymNCO):
             self.env,
             phase=phase,
             return_init_embeds=True,
+            **kwargs
         )
 
         # Unbatchify reward to [batch_size, n_start, n_aug].

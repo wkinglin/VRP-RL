@@ -178,3 +178,18 @@ cython_debug/
 
 # VSCode debug launch file
 .vscode/
+
+# pictures
+*.png
+
+# data
+*.json
+*.csv
+*.txt
+*.log
+*.log.*
+*.log.*.*
+
+# models
+*.pth
+*.ckpt
